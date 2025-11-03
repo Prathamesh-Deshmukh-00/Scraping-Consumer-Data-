@@ -1,4 +1,8 @@
 import { remote } from 'webdriverio';
+import Bill from "./models/billModel.js"; // ✅ Import Bill model
+import { ConsumerBillNumber } from './ConsumerBillNumber.js';
+import mongoose from "mongoose";
+import dotenv from "dotenv";
 
 const caps = {
   platformName: "Android",
@@ -308,13 +312,48 @@ async function waitForAndClickMahavitaranButton(driver) {
   }
 }
 
+
+dotenv.config(); // ✅ Load environment variables from .env
+
+// ✅ Connect to MongoDB Atlas
+const MONGO_URI = process.env.MONGO_URI;
+
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log("✅ MongoDB Connected Successfully"))
+  .catch((error) => {
+    console.error("❌ MongoDB Connection Failed:", error.message);
+    process.exit(1);
+  });
+
 // ✅ MAIN EXECUTION FLOW — Handles multiple consumers
 async function main() {
   const driver = await launchApp();
-  const consumerNumbers = ["110013196591" ,"319180105227", "319187226577", "110014069283" ];
+  const uniqueBillNumbers = [...new Set(ConsumerBillNumber)];
+  let consumerNumbers = uniqueBillNumbers;
   const allData = [];
 
   try {
+    console.log("🔍 Checking for already existing consumers in database...");
+
+    // ✅ Find existing consumers
+    const existingBills = await Bill.find({
+      consumerNumber: { $in: consumerNumbers },
+    }).select("consumerNumber");
+
+    const existingNumbers = existingBills.map((bill) => bill.consumerNumber);
+    consumerNumbers = consumerNumbers.filter((num) => !existingNumbers.includes(num));
+
+    if (consumerNumbers.length === 0) {
+      console.log("✅ All consumer numbers already exist. No new entries to process.");
+      await driver.deleteSession();
+      await mongoose.connection.close();
+      return;
+    }
+
+    console.log("🆕 Consumers to process:", consumerNumbers.join(", "));
+
+    // ✅ Process new consumers
     for (const number of consumerNumbers) {
       console.log(`\n🚀 Processing Consumer: ${number}\n`);
 
@@ -329,6 +368,13 @@ async function main() {
       await scrollDown(driver);
       await retrievePaymentDetails(driver, details);
       await finalValidation(details);
+
+      details.status = "pending"; // keep as pending
+
+      const newBill = new Bill(details);
+      await newBill.save();
+      console.log(`💾 Saved new bill for consumer: ${details.consumerNumber}`);
+
       allData.push(details);
 
       await waitForAndClickMahavitaranButton(driver);
@@ -336,13 +382,13 @@ async function main() {
       await driver.pause(5000);
     }
 
-    console.log("\n✅✅ All consumers processed successfully! ✅✅");
-    console.log(JSON.stringify(allData, null, 2));
+    console.log("\n✅✅ All new consumers processed and stored successfully! ✅✅");
   } catch (err) {
     console.error("❌ Error during execution:", err.message);
   } finally {
     await driver.deleteSession();
-    console.log("✅ Session closed successfully!");
+    await mongoose.connection.close();
+    console.log("✅ Session and MongoDB connection closed successfully!");
   }
 }
 
