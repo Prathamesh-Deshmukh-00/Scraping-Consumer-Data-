@@ -202,44 +202,52 @@ async function main() {
   );
   console.log(`\nProcessed ${files.length} image(s).`);
 
-// ✅ Save only consumer bill numbers as array in ConsumerBillNumber.js
-const outputPath = path.resolve("./ConsumerBillNumber.js");
+  // ✅ Save only consumer bill numbers as array in ConsumerBillNumber.js
+  const outputPath = path.resolve("./ConsumerBillNumber.js");
 
-try {
-  // Extract only bill numbers from allResults
-  const newBillNumbers = allResults
-    .map(item => item.data.consumer_Bill_Number)
-    .filter(Boolean); // remove undefined or null entries
+  try {
+    // Extract only bill numbers from allResults
+    const newBillNumbers = allResults
+      .map(item => item.data.consumer_Bill_Number)
+      .filter(Boolean); // remove undefined or null entries
 
-  let existingNumbers = [];
+    let existingNumbers = [];
 
-  // If file already exists, read existing array
-  if (fs.existsSync(outputPath)) {
-    const existingContent = fs.readFileSync(outputPath, "utf-8");
+    // If file already exists, read existing array
+    if (fs.existsSync(outputPath)) {
+      const existingContent = fs.readFileSync(outputPath, "utf-8");
 
-    // Try extracting existing array safely
-    const match = existingContent.match(/\[([\s\S]*?)\]/);
-    if (match) {
-      existingNumbers = JSON.parse("[" + match[1] + "]");
+      // Try extracting existing array safely
+      const match = existingContent.match(/\[([\s\S]*?)\]/);
+      if (match) {
+        existingNumbers = JSON.parse("[" + match[1] + "]");
+      }
     }
+
+    // Merge and remove duplicates
+    const updatedNumbers = Array.from(new Set([...existingNumbers, ...newBillNumbers]));
+
+    // Prepare updated JS file content
+    const jsContent = `export const ConsumerBillNumber = ${JSON.stringify(updatedNumbers, null, 2)};\n`;
+
+    // Write to file
+    fs.writeFileSync(outputPath, jsContent, "utf-8");
+    console.log(`\n📄 Consumer bill numbers updated in: ${outputPath}`);
+  } catch (error) {
+    console.error(`\n❌ Failed to save bill numbers: ${error.message}`);
   }
 
-  // Merge and remove duplicates
-  const updatedNumbers = Array.from(new Set([...existingNumbers, ...newBillNumbers]));
-
-  // Prepare updated JS file content
-  const jsContent = `export const ConsumerBillNumber = ${JSON.stringify(updatedNumbers, null, 2)};\n`;
-
-  // Write to file
-  fs.writeFileSync(outputPath, jsContent, "utf-8");
-  console.log(`\n📄 Consumer bill numbers updated in: ${outputPath}`);
-} catch (error) {
-  console.error(`\n❌ Failed to save bill numbers: ${error.message}`);
-}
-
-
-
   console.log("\nresponse is:", allResults);
+
+  // ✅ Delete all used images after completion
+  try {
+    for (const file of files) {
+      fs.unlinkSync(file);
+    }
+    console.log(`\n🧹 All processed images deleted from: ${IMAGE_FOLDER}`);
+  } catch (error) {
+    console.error(`\n❌ Failed to delete images: ${error.message}`);
+  }
 }
 
-main();
+export {main};

@@ -1,4 +1,6 @@
-export const uploadImages = (req, res) => {
+import { main } from "../extractConsumerNumber.js";
+
+export const uploadImages = async (req, res) => {
   try {
     const files = req.files.map((file) => ({
       filename: file.filename,
@@ -6,15 +8,19 @@ export const uploadImages = (req, res) => {
       size: file.size,
     }));
 
+    // ✅ Run main() after all images are uploaded and wait until it finishes
+    await main();
+
+    // ✅ Send response only after main() completes
     res.status(200).json({
       success: true,
-      message: "Images uploaded successfully!",
+      message: "Images uploaded and processed successfully!",
       files,
     });
   } catch (err) {
     res.status(400).json({
       success: false,
-      message: err.message || "Error uploading images",
+      message: err.message || "Error uploading or processing images",
     });
   }
 };
