@@ -11,10 +11,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@wdio/cli": "^9.20.0",
-    "appium": "^3.1.0",
-    "appium-doctor": "^1.15.1",
-    "webdriverio": "^9.20.0"
+   
   },
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
