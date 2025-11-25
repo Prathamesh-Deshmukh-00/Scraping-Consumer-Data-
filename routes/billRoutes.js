@@ -3,12 +3,16 @@ import {
   getBills,
   updateBill,
   deleteBill,
+  getBillsNumber
 } from "../controllers/billController.js";
 
 const router = express.Router();
 
 // ✅ GET all bills
 router.get("/", getBills);
+
+// ✅ GET all bills Number 
+router.get("/BillNumber", getBillsNumber);
 
 // ✅ UPDATE bill by ID
 router.put("/:id", updateBill);

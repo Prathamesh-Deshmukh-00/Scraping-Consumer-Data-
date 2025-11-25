@@ -1,6 +1,7 @@
 import { main } from "../extractConsumerNumber.js";
 
 export const uploadImages = async (req, res) => {
+  console.log("this controller is called ",req.files)
   try {
     const files = req.files.map((file) => ({
       filename: file.filename,

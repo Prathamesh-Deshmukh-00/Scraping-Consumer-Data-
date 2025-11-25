@@ -1,10 +1,21 @@
 import Bill from "../models/billModel.js";
+import { ConsumerBillNumber } from '../ConsumerBillNumber.js';
 
 // ✅ GET all bills
 export const getBills = async (req, res) => {
   try {
     const bills = await Bill.find().sort({ createdAt: -1 });
     res.status(200).json({ success: true, data: bills });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ✅ GET all bills
+export const getBillsNumber = async (req, res) => {
+  try {
+   
+    res.status(200).json({ success: true, data: ConsumerBillNumber });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
