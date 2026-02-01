@@ -26,6 +26,20 @@ const billSchema = new mongoose.Schema(
       default: "pending",
     },
 
+    // ✅ Priority Level (P1, P2, P3) - Only relevant when status is 'inprocess'
+    priority: {
+      type: String,
+      enum: ["none", "p1", "p2", "p3"],
+      default: "none",
+    },
+
+    // ✅ Pipeline Stage Reference (Kanban)
+    stageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Stage",
+      default: null,
+    },
+
     // ✅ Added note field
     note: {
       type: String,

@@ -1,5 +1,6 @@
+import ConsumerNumber from "../models/consumerNumberModel.js";
 import Bill from "../models/billModel.js";
-import { ConsumerBillNumber } from '../ConsumerBillNumber.js';
+// fs not needed anymore for this controller
 
 // ✅ GET all bills
 export const getBills = async (req, res) => {
@@ -11,11 +12,12 @@ export const getBills = async (req, res) => {
   }
 };
 
-// ✅ GET all bills
+// ✅ GET all bills numbers (From MongoDB)
 export const getBillsNumber = async (req, res) => {
   try {
-   
-    res.status(200).json({ success: true, data: ConsumerBillNumber });
+    const numbersDocs = await ConsumerNumber.find().sort({ createdAt: -1 });
+    const billNumbers = numbersDocs.map(doc => doc.consumerNumber);
+    res.status(200).json({ success: true, data: billNumbers });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

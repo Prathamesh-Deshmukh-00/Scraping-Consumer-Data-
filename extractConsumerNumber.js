@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { GoogleGenAI, Type } from "@google/genai";
 import * as fs from "fs";
 import * as path from "path";
+import ConsumerNumber from "./models/consumerNumberModel.js";
 
 // --- Configuration ---
 const IMAGE_FOLDER = "./Images";
@@ -15,7 +16,7 @@ const MIN_DELAY_MS = (60 / MAX_REQUESTS_PER_MINUTE) * 1000;
 // --- End Configuration ---
 
 // Initialize the client. It will automatically use the GEMINI_API_KEY from the environment.
-const ai = new GoogleGenAI({});
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Define the exact JSON schema for the model's output
 const consumerNumberSchema = {
@@ -128,126 +129,101 @@ async function extractWithRetry(filePath) {
   return null; // All retries failed
 }
 
-async function main() {
-  console.log(`Starting batch extraction from folder: ${IMAGE_FOLDER}`);
-  console.log(
-    `Target rate limit: Max ${MAX_REQUESTS_PER_MINUTE} RPM (Min delay: ${MIN_DELAY_MS}ms)`
-  );
-  console.log(`Max retries per file: ${MAX_RETRIES}`);
-  console.log(
-    "----------------------------------------------------------------------------------"
-  );
-
-  // 2. Process all images in the Images folder
-  if (!fs.existsSync(IMAGE_FOLDER)) {
-    console.error(
-      `\nFATAL ERROR: Image folder not found at path: ${IMAGE_FOLDER}. Please create it and add images.`
-    );
-    return;
-  }
-
-  const files = fs
-    .readdirSync(IMAGE_FOLDER)
-    .filter((file) => /\.(png|jpe?g)$/i.test(file))
-    .map((file) => path.join(IMAGE_FOLDER, file));
-
-  if (files.length === 0) {
-    console.log(
-      "\nNo image files found. Please ensure images are in the './Images' folder. Exiting."
-    );
-    return;
-  }
-
-  const allResults = [];
-
-  // Process each file sequentially with rate limiting
-  for (const [index, filePath] of files.entries()) {
-    const startTime = Date.now();
-
-    const result = await extractWithRetry(filePath);
-
-    if (result) {
-      allResults.push({
-        file: path.basename(filePath),
-        data: result,
-      });
-    } else {
-      allResults.push({
-        file: path.basename(filePath),
-        data: { consumer_Bill_Number: "EXTRACTION_FAILED_PERMANENTLY" },
-      });
-    }
-
-    // Rate Limiting Logic
-    const elapsedTime = Date.now() - startTime;
-    const timeToWait = MIN_DELAY_MS - elapsedTime;
-
-    if (timeToWait > 0 && index < files.length - 1) {
-      console.log(
-        `[RATE LIMITER] Delaying for ${Math.round(timeToWait / 1000)}s to ensure ≤ ${MAX_REQUESTS_PER_MINUTE} RPM...`
-      );
-      await delay(timeToWait);
-    }
-  }
-
-  // Final Summary Output
-  console.log("\n==================================================================================");
-  console.log("                           ✅ BATCH PROCESSING COMPLETE");
-  console.log("==================================================================================");
-  console.table(
-    allResults.map((r) => ({
-      File: r.file,
-      "Consumer Number": r.data.consumer_Bill_Number,
-    }))
-  );
-  console.log(`\nProcessed ${files.length} image(s).`);
-
-  // ✅ Save only consumer bill numbers as array in ConsumerBillNumber.js
-  const outputPath = path.resolve("./ConsumerBillNumber.js");
-
+async function main(targetFiles = []) {
   try {
-    // Extract only bill numbers from allResults
-    const newBillNumbers = allResults
-      .map(item => item.data.consumer_Bill_Number)
-      .filter(Boolean); // remove undefined or null entries
+    let files = [];
 
-    let existingNumbers = [];
+    // 1. Determine which files to process
+    if (targetFiles && targetFiles.length > 0) {
+      files = targetFiles;
+    } else {
+      // Fallback to directory scan
+      if (!fs.existsSync(IMAGE_FOLDER)) {
+        console.error(`Image folder not found: ${IMAGE_FOLDER}`);
+        return [];
+      }
+      files = fs.readdirSync(IMAGE_FOLDER)
+        .filter(file => {
+          const ext = path.extname(file).toLowerCase();
+          return ext === ".png" || ext === ".jpg" || ext === ".jpeg";
+        })
+        .map(file => path.join(IMAGE_FOLDER, file));
+    }
 
-    // If file already exists, read existing array
-    if (fs.existsSync(outputPath)) {
-      const existingContent = fs.readFileSync(outputPath, "utf-8");
+    if (files.length === 0) {
+      console.log("No images found to process.");
+      return [];
+    }
 
-      // Try extracting existing array safely
-      const match = existingContent.match(/\[([\s\S]*?)\]/);
-      if (match) {
-        existingNumbers = JSON.parse("[" + match[1] + "]");
+    console.log(`Found ${files.length} images to process.`);
+
+    const allResults = [];
+
+    // 2. Process each image with rate limiting
+    for (const filePath of files) {
+      console.log(`Processing: ${filePath}`);
+      const startTime = Date.now();
+
+      try {
+        const result = await extractWithRetry(filePath);
+        if (result && result.consumer_Bill_Number) {
+          console.log(`   -> Extracted: ${result.consumer_Bill_Number}`);
+          const consumerNumber = result.consumer_Bill_Number;
+
+          // Rename file
+          const dir = path.dirname(filePath);
+          const ext = path.extname(filePath);
+          const safeNumber = consumerNumber.replace(/[^a-z0-9]/gi, '_');
+          const finalPath = path.join(dir, `${safeNumber}_${Date.now()}${ext}`);
+
+          fs.renameSync(filePath, finalPath);
+          console.log(`   -> Renamed to: ${path.basename(finalPath)}`);
+
+          allResults.push({
+            file: filePath,
+            newPath: finalPath,
+            data: { consumer_Bill_Number: consumerNumber }
+          });
+
+          // ✅ Save to MongoDB (Upsert to prevent duplicates)
+          try {
+            await ConsumerNumber.findOneAndUpdate(
+              { consumerNumber: consumerNumber },
+              { consumerNumber: consumerNumber },
+              { upsert: true, new: true }
+            );
+            console.log(`   -> Saved to MongoDB: ${consumerNumber}`);
+          } catch (dbError) {
+            console.error(`   -> MongoDB Save Error: ${dbError.message}`);
+          }
+
+        } else {
+          console.log(`   -> No number extracted.`);
+        }
+      } catch (error) {
+        console.error(`   -> Error processing ${filePath}:`, error.message);
+      }
+
+      // Enforce rate limit delay
+      const elapsedTime = Date.now() - startTime;
+      if (elapsedTime < MIN_DELAY_MS) {
+        await delay(MIN_DELAY_MS - elapsedTime);
       }
     }
 
-    // Merge and remove duplicates
-    const updatedNumbers = Array.from(new Set([...existingNumbers, ...newBillNumbers]));
+    // Cleanup images
+    try {
+      for (const file of files) {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+      }
+    } catch (e) { }
 
-    // Prepare updated JS file content
-    const jsContent = `export const ConsumerBillNumber = ${JSON.stringify(updatedNumbers, null, 2)};\n`;
+    return allResults;
 
-    // Write to file
-    fs.writeFileSync(outputPath, jsContent, "utf-8");
-    console.log(`\n📄 Consumer bill numbers updated in: ${outputPath}`);
   } catch (error) {
-    console.error(`\n❌ Failed to save bill numbers: ${error.message}`);
-  }
-
-  console.log("\nresponse is:", allResults);
-
-  // ✅ Delete all used images after completion
-  try {
-    for (const file of files) {
-      fs.unlinkSync(file);
-    }
-    console.log(`\n🧹 All processed images deleted from: ${IMAGE_FOLDER}`);
-  } catch (error) {
-    console.error(`\n❌ Failed to delete images: ${error.message}`);
+    console.error("Fatal error in main loop:", error);
+    throw error;
   }
 }
 
-export {main};
+export { main };

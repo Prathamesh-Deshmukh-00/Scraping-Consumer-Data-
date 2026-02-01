@@ -1,7 +1,7 @@
 import { main } from "../extractConsumerNumber.js";
 
 export const uploadImages = async (req, res) => {
-  console.log("this controller is called ",req.files)
+  console.log("this controller is called ", req.files)
   try {
     const files = req.files.map((file) => ({
       filename: file.filename,
@@ -9,14 +9,16 @@ export const uploadImages = async (req, res) => {
       size: file.size,
     }));
 
-    // ✅ Run main() after all images are uploaded and wait until it finishes
-    await main();
+    // ✅ Run main() with SPECIFIC files
+    const uploadedFilePaths = req.files.map(f => f.path);
+    const extractionResults = await main(uploadedFilePaths);
 
     // ✅ Send response only after main() completes
     res.status(200).json({
       success: true,
       message: "Images uploaded and processed successfully!",
-      files,
+      processedFiles: extractionResults,
+      originalFiles: files,
     });
   } catch (err) {
     res.status(400).json({
