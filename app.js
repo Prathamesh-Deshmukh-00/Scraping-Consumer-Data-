@@ -6,6 +6,7 @@ import uploadRoutes from "./routes/uploadRoutes.js";
 import billRoutes from "./routes/billRoutes.js";
 import stageRoutes from "./routes/stageRoutes.js";
 import historyRoutes from "./routes/historyRoutes.js";
+import "./cronScheduler.js"; // Initialize Scheduler
 
 
 dotenv.config();

@@ -9,20 +9,29 @@ import ConsumerNumber from "./models/consumerNumberModel.js";
 
 // ================= CONFIG =================
 const IMAGE_FOLDER = "./Images";
-const MODEL_NAME = "gemini-2.5-flash-lite";
 
-// 🔒 Rate limiting & retry
-const API_GAP_MS = 10_000;        // 10 seconds gap between ALL Gemini calls
-const MAX_RETRIES = 3;            // Retry Gemini max 3 times
-const BASE_RETRY_DELAY = 3_000;   // Base delay for exponential backoff
+// MODEL PRIORITY
+// Removed Pro model as per request.
+const PRIMARY_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.5-flash-lite";
 
-let lastApiCallTime = 0;
-// ==========================================
+// Retry + rate-limit
+const API_GAP_MS = 1500;        // Reduced from 10s to 1.5s
+const MAX_RETRIES = 3;
+const BASE_RETRY_DELAY = 2000;
+const CONCURRENCY_LIMIT = 3;    // Process 3 images at once
 
-// ================= GEMINI CLIENT =================
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+// ================= GEMINI CLIENTS (ROTATION) =================
+const apiKeys = [
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2
+].filter(Boolean); // Filter out undefined keys
+
+if (apiKeys.length === 0) {
+  console.error("❌ NO GEMINI API KEYS FOUND IN .ENV");
+}
+
+const clients = apiKeys.map(key => new GoogleGenAI({ apiKey: key }));
 
 // ================= RESPONSE SCHEMA =================
 const consumerNumberSchema = {
@@ -40,46 +49,42 @@ const consumerNumberSchema = {
 // ================= UTILITIES =================
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-async function waitForNextApiSlot() {
-  const now = Date.now();
-  const elapsed = now - lastApiCallTime;
+// Simple concurrency limiter
+async function asyncPool(poolLimit, array, iteratorFn) {
+  const ret = [];
+  const executing = [];
+  for (const item of array) {
+    const p = Promise.resolve().then(() => iteratorFn(item));
+    ret.push(p);
 
-  if (elapsed < API_GAP_MS) {
-    const waitTime = API_GAP_MS - elapsed;
-    console.log(`⏳ Waiting ${Math.ceil(waitTime / 1000)}s before Gemini call`);
-    await delay(waitTime);
+    if (poolLimit <= array.length) {
+      const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+      executing.push(e);
+      if (executing.length >= poolLimit) {
+        await Promise.race(executing);
+      }
+    }
   }
-
-  lastApiCallTime = Date.now();
+  return Promise.all(ret);
 }
 
-function fileToGenerativePart(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
-
-  const base64 = fs.readFileSync(path.resolve(filePath)).toString("base64");
-
+function bufferToGenerativePart(buffer, mimeType) {
   return {
     inlineData: {
-      data: base64,
+      data: buffer.toString("base64"),
       mimeType,
     },
   };
 }
 
-// ================= CORE OCR (SAFE + RETRY) =================
-async function extractWithRetry(filePath) {
-  const fileName = path.basename(filePath);
+function fileToGenerativePart(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
+  return bufferToGenerativePart(fs.readFileSync(filePath), mimeType);
+}
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      console.log(`\n[${fileName}] Gemini attempt ${attempt}/${MAX_RETRIES}`);
-
-      const imagePart = fileToGenerativePart(filePath);
-
-      // ❌ DO NOT MINIMIZE — ACCURACY-FIRST PROMPT
-      const textPart = {
-        text: `
+// ================= PROMPT =================
+const OCR_PROMPT = `
 You are a deterministic OCR extraction engine for Indian electricity bills.
 
 YOUR ONLY TASK:
@@ -87,240 +92,316 @@ Extract the value written IMMEDIATELY NEXT TO the Marathi label:
 
 "ग्राहक क्रमांक"
 
-ABSOLUTE FACT (MANDATORY):
+ABSOLUTE FACT:
 - A valid ग्राहक क्रमांक is ALWAYS an EXACTLY 12-DIGIT NUMERIC NUMBER.
-- If the number is not exactly 12 digits, it is INVALID.
 
-ALLOWED LABEL VARIANTS (ONLY THESE):
+ALLOWED LABEL VARIANTS:
 - ग्राहक क्रमांक
 - ग्राहक क्र.
 - ग्राहक क्र
 - ग्राहक क्रमांक :
 
-STRICT RULES (NO EXCEPTIONS):
-1. Extract ONLY if one of the above Marathi labels is CLEARLY visible.
-2. The number MUST be on the SAME LINE or IMMEDIATELY NEXT TO the label.
-3. The value MUST contain ONLY digits (0–9) and MUST be EXACTLY 12 digits long.
-4. If the Marathi label is NOT found → return null.
-5. If the number is not exactly 12 digits → return null.
-6. DO NOT guess, infer, translate, or approximate.
+STRICT RULES:
+1. Extract ONLY if label is clearly visible.
+2. Number must be on SAME LINE or IMMEDIATELY NEXT TO label.
+3. Digits only, EXACTLY 12 digits.
+4. If label not found → null.
+5. If digits not 12 → null.
+6. DO NOT guess.
 
 DO NOT EXTRACT:
-- Consumer No (English)
-- Customer Number
-- Account Number
-- Bill Number
-- Meter Number
-- CIN / GSTIN
-- Mobile Number
-- Any number shorter or longer than 12 digits
+- Consumer No / Account No / Meter No
+- Bill No / GSTIN / Mobile No
 
-OUTPUT RULES:
-- Return ONLY valid JSON
-- No explanation
-- No markdown
-- No extra text
+OUTPUT:
+JSON ONLY. No text. No markdown.
 
-OUTPUT FORMAT:
+FORMAT:
 {
-  "consumer_number": "<12_digit_number_or_null>"
+  "consumer_number": "<12_digit_or_null>"
 }
-`,
-      };
+`;
 
-      // 🔒 GLOBAL RATE LIMIT (ABSOLUTE)
-      await waitForNextApiSlot();
+// ================= CORE OCR WITH FALLBACK & ROTATION =================
+async function extractWithRetry(fileObj, isBuffer = false) {
+  const fileName = isBuffer ? fileObj.originalname : path.basename(fileObj);
+  const models = [PRIMARY_MODEL, FALLBACK_MODEL]; // Pro model removed
 
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: [imagePart, textPart],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: consumerNumberSchema,
-        },
-      });
+  let attempt = 0;
 
-      const parsed = JSON.parse(response.text.trim());
+  for (const model of models) {
+    // Try each client (API Key) for specific model
+    // Logic: If Key 1 fails, try Key 2 with SAME model before moving to next model
+    // Or: We can rotate keys per request. Let's try Key Rotation logic inside the loop.
 
-      if (parsed.consumer_number === null) {
-        console.log(`[${fileName}] ⚠️ ग्राहक क्रमांक not found`);
-        return { error: "Label 'ग्राहक क्रमांक' not found in image" };
+    for (let retry = 1; retry <= MAX_RETRIES; retry++) {
+      attempt++;
+
+      // Pick client based on rotation or fallback? 
+      // Strategy: Try Primary Key. If 429/Error, try Secondary Key immediately.
+
+      let lastError = null;
+
+      for (let i = 0; i < clients.length; i++) {
+        const client = clients[i];
+        const keyName = i === 0 ? "Key 1" : "Key 2";
+
+        try {
+          await delay(Math.random() * 500);
+
+          console.log(`[${fileName}] Processing on ${model} (Using ${keyName})...`);
+
+          const imagePart = isBuffer
+            ? bufferToGenerativePart(fileObj.buffer, fileObj.mimetype)
+            : fileToGenerativePart(fileObj);
+
+          const response = await client.models.generateContent({
+            model,
+            contents: [
+              imagePart,
+              { text: OCR_PROMPT },
+            ],
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: consumerNumberSchema,
+            },
+          });
+
+          const parsed = JSON.parse(response.text.trim());
+
+          if (parsed.consumer_number === null) {
+            throw new Error("Label not found");
+          }
+
+          if (!/^\d{12}$/.test(parsed.consumer_number)) {
+            throw new Error("Invalid digit length");
+          }
+
+          return {
+            consumer_number: parsed.consumer_number,
+            modelUsed: model,
+            attemptsUsed: attempt,
+            keyUsed: keyName
+          };
+
+        } catch (err) {
+          lastError = err;
+          const msg = err.message || "";
+          // If it's a 429 or server error, continue loop to try next key immediately
+          if (msg.includes("429") || msg.includes("503")) {
+            console.warn(`[${fileName}] ${keyName} Exhausted/Error (${msg}). Switching key...`);
+            continue; // Try next key
+          } else {
+            // If it's a logic error (Parsed null), breaking inner key loop to trigger normal retry
+            break;
+          }
+        }
       }
 
-      if (!/^\d{12}$/.test(parsed.consumer_number)) {
-        throw new Error("Invalid consumer number (not 12 digits)");
+      // If we are here, all keys failed for this retry attempt
+      if (retry < MAX_RETRIES) {
+        const backoff = BASE_RETRY_DELAY * Math.pow(1.5, retry - 1);
+        console.warn(`[${fileName}] Retry ${retry} failed on all keys. Backing off ~${Math.ceil(backoff)}ms`);
+        await delay(backoff);
       }
-
-      console.log(`[${fileName}] ✅ Extracted: ${parsed.consumer_number}`);
-      return { consumer_number: parsed.consumer_number, attemptsUsed: attempt };
-    } catch (err) {
-      const retryable =
-        err.message.includes("429") ||
-        err.message.includes("500") ||
-        err.message.includes("503") ||
-        err.message.includes("504");
-
-      if (!retryable || attempt === MAX_RETRIES) {
-        console.error(`[${fileName}] ❌ Permanent failure: ${err.message}`);
-        return { error: err.message || "Gemini API Failed" };
-      }
-
-      const retryDelay =
-        BASE_RETRY_DELAY * Math.pow(2, attempt - 1) +
-        Math.floor(Math.random() * 1000);
-
-      console.warn(
-        `[${fileName}] 🔁 Retry in ${Math.ceil(retryDelay / 1000)}s`
-      );
-
-      await delay(retryDelay);
     }
   }
 
-  return { error: "Max retries exceeded", attemptsUsed: MAX_RETRIES };
+  return { error: "All models and keys failed" };
 }
 
-// ================= MAIN BATCH PROCESS =================
-async function main(targetFiles = []) {
-  let files = [];
+// ================= MAIN PROCESS =================
+async function main(filesArg = null) {
+  // Ensure Pending and Failed folders exist
+  const PENDING_FOLDER = "./PendingImages";
+  const FAIL_FOLDER = "./FailedImages";
+  [PENDING_FOLDER, FAIL_FOLDER].forEach(dir => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  });
 
-  if (targetFiles.length > 0) {
-    files = targetFiles;
+  let filesToProcess = [];
+  let isBufferMode = false;
+
+  if (filesArg && Array.isArray(filesArg) && filesArg.length > 0) {
+    filesToProcess = filesArg; // Memory mode
+    isBufferMode = true;
   } else {
+    // Disk mode (fallback)
     if (!fs.existsSync(IMAGE_FOLDER)) {
       console.error("❌ Image folder not found");
-      return;
+      return { success: [], failed: [], stats: {} };
     }
-
-    files = fs
+    filesToProcess = fs
       .readdirSync(IMAGE_FOLDER)
       .filter((f) => /\.(png|jpg|jpeg)$/i.test(f))
       .map((f) => path.join(IMAGE_FOLDER, f));
   }
 
-  if (files.length === 0) {
-    console.log("⚠️ No images found");
-    return;
-  }
+  console.log(`\n🚀 Starting Batch Processing: ${filesToProcess.length} files`);
 
   const success = [];
   const failed = [];
-  let firstAttemptSuccessCount = 0;
-  let retrySuccessCount = 0;
-  const processed = new Set();
+  let firstAttemptSuccess = 0;
+  let retrySuccess = 0;
 
-  for (const filePath of files) {
-    console.log(`\n📂 Processing: ${filePath}`);
-    const fileName = path.basename(filePath);
+  // Flag to abort remaining queue
+  let stopProcessing = false;
+
+  // WORKER FUNCTION for concurrent pool
+  const worker = async (fileObj) => {
+    if (stopProcessing) return; // Hook to abort pending workers if limits hit
+
+    const fileName = isBufferMode ? fileObj.originalname : path.basename(fileObj);
 
     try {
-      const result = await extractWithRetry(filePath);
+      const result = await extractWithRetry(fileObj, isBufferMode);
 
-      if (result.error || !result.consumer_number) {
-        failed.push({
-          file: fileName,
-          reason: result.error || "Consumer number not found",
-        });
-        continue;
+      if (result.error) {
+        // === SAVE FAILED IMAGE ===
+        // Sanitize error message for filename
+        const safeReason = (result.error || "Unknown").replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
+        const failName = `FAILED_${safeReason}_${Date.now()}_${fileName}`;
+        const destPath = path.join(FAIL_FOLDER, failName);
+
+        try {
+          if (isBufferMode && fileObj.buffer) {
+            fs.writeFileSync(destPath, fileObj.buffer);
+            console.log(`⚠️  Saved failed image: ${failName}`);
+          } else if (!isBufferMode) {
+            fs.copyFileSync(fileObj, destPath);
+            console.log(`⚠️  Saved failed image: ${failName}`);
+          }
+        } catch (e) {
+          console.error("Failed to save failed image:", e.message);
+        }
+
+        failed.push({ file: fileName, reason: result.error });
+
+        // Delete from source if disk mode and not kept
+        if (!isBufferMode) try { fs.unlinkSync(fileObj); } catch (e) { }
+        return;
       }
 
-      const { consumer_number: consumerNumber, attemptsUsed } = result;
-      // attemptsUsed is harder to track without return, let's assume 1 if not returned or check logs
-      // Actually my previous extractWithRetry didn't return attemptsUsed either in the new return style?
-      // Wait, the previous implementation returned { consumer_number: ..., attemptsUsed: ... }
-      // I removed attemptsUsed in the latest replace?
-      // Let's re-add attemptsUsed to extractWithRetry return if possible, or default to 1.
+      const { consumer_number, modelUsed, attemptsUsed } = result;
 
-      // const attemptsUsed = result.attemptsUsed || 1; // Default fallback
+      if (attemptsUsed === 1) firstAttemptSuccess++;
+      else retrySuccess++;
 
-      if (attemptsUsed === 1) {
-        firstAttemptSuccessCount++;
+      let duplicate = false;
+      try {
+        duplicate = await ConsumerNumber.findOne({ consumerNumber: consumer_number });
+        if (!duplicate) {
+          await ConsumerNumber.create({ consumerNumber: consumer_number });
+        } else {
+          duplicate = true;
+        }
+      } catch (dbErr) {
+        console.error("DB Error (continuing):", dbErr.message);
+      }
+
+      if (!isBufferMode) {
+        const newName = `${consumer_number}_${Date.now()}${path.extname(fileObj)}`;
+        try { fs.renameSync(fileObj, path.join(IMAGE_FOLDER, newName)); } catch (e) { }
       } else {
-        retrySuccessCount++;
+        // Save successful image to disk in buffer mode
+        const newName = `${consumer_number}_${Date.now()}${path.extname(fileName)}`;
+        try { fs.writeFileSync(path.join(IMAGE_FOLDER, newName), fileObj.buffer); } catch (e) {
+          console.error("Failed to save successful image:", e.message);
+        }
       }
-
-
-      // 🔒 Safe rename
-      const safe = consumerNumber.replace(/\D/g, "");
-      const newPath = path.join(
-        path.dirname(filePath),
-        `${safe}_${Date.now()}${path.extname(filePath)}`
-      );
-
-      let isDuplicate = false;
-
-      // 🔍 Check for duplicates
-      const existing = await ConsumerNumber.findOne({ consumerNumber });
-
-      if (existing) {
-        isDuplicate = true;
-        console.log(`⚠️ Duplicate found: ${consumerNumber}`);
-      } else {
-        // ✅ DB upsert (no duplicates)
-        await ConsumerNumber.create({ consumerNumber });
-      }
-
-      // Rename logic: we rename regardless of duplicate status to mark as "processed"
-      // otherwise it will remain in the folder and gets re-processed in next run.
-      // If needed we can append _DUPLICATE to filename but for now simpler is better.
-      fs.renameSync(filePath, newPath);
-      processed.add(filePath);
 
       success.push({
-        original: filePath,
-        renamed: newPath,
-        consumerNumber,
+        file: fileName,
+        consumerNumber: consumer_number,
+        isDuplicate: !!duplicate,
+        modelUsed,
         attemptsUsed,
-        isDuplicate
+        original: fileName
       });
 
-      console.log(`✅ Saved & renamed → ${path.basename(newPath)} (Attempts: ${attemptsUsed}, Duplicate: ${isDuplicate})`);
+      console.log(`✅ ${fileName} -> ${consumer_number} (Model: ${modelUsed})`);
+
     } catch (err) {
-      console.error(`❌ Image-level error: ${filePath}`);
-      console.error(err.message);
+      // Handle critical errors like QuotaExhausted
+      if (err instanceof QuotaExhaustedError) {
+        console.error(`\n🚨 CRITICAL: ${err.message} - STOPPING BATCH.`);
+        stopProcessing = true;
+        failed.push({ file: fileName, reason: "QuotaExhausted", isPending: true, data: fileObj });
+      } else {
+        // Unexpected critical error - save as failed
+        const failName = `ERROR_UNEXPECTED_${Date.now()}_${fileName}`;
+        const destPath = path.join(FAIL_FOLDER, failName);
+        try {
+          if (isBufferMode && fileObj.buffer) fs.writeFileSync(destPath, fileObj.buffer);
+        } catch (e) { }
 
-      failed.push({
-        file: path.basename(filePath),
-        reason: err.message,
-      });
-
-      // ❗ DO NOT THROW — CONTINUE SAFELY
-      continue;
-    }
-  }
-
-  // 🧹 Delete only unprocessed images
-  for (const f of files) {
-    if (!processed.has(f) && fs.existsSync(f)) {
-      fs.unlinkSync(f);
-    }
-  }
-
-  // ================= FINAL REPORT =================
-  console.log("\n📊 JOB SUMMARY");
-  console.log("✔ Success:", success.length);
-  console.log("❌ Failed:", failed.length);
-
-  if (failed.length > 0) {
-    fs.writeFileSync(
-      "failed_images.json",
-      JSON.stringify(failed, null, 2)
-    );
-    console.log("🧾 Failed list saved to failed_images.json");
-  }
-
-  return {
-    success,
-    failed,
-    stats: {
-      total: files.length,
-      success: success.filter(s => !s.isDuplicate).length,
-      duplicate: success.filter(s => s.isDuplicate).length, // Add duplicate count
-      failed: failed.length,
-      firstAttemptSuccess: firstAttemptSuccessCount,
-      retrySuccess: retrySuccessCount
+        console.error(`Error processing ${fileName}:`, err);
+        failed.push({ file: fileName, reason: err.message });
+      }
     }
   };
+
+  // Run with concurrency limit
+  await asyncPool(CONCURRENCY_LIMIT, filesToProcess, worker);
+
+  // === HANDLE STOPPED / PENDING FILES ===
+  if (stopProcessing) {
+    console.log("\n🛑 Quota Reached. Saving pending images to storage...");
+    let pendingCount = 0;
+
+    // 1. Identify processed files
+    const processedNames = new Set([...success, ...failed].map(f => f.file));
+
+    // 2. Iterate original list to find stragglers
+    for (const f of filesToProcess) {
+      const fname = isBufferMode ? f.originalname : path.basename(f);
+
+      // Check if this file was "left behind" or "QuotaExhausted"
+      const failRecord = failed.find(x => x.file === fname);
+      const isQuotaFailure = failRecord && failRecord.isPending;
+
+      if (!processedNames.has(fname) || isQuotaFailure) {
+        const timestamp = Date.now();
+        const safeName = `PENDING_${timestamp}_${fname}`;
+        const destPath = path.join(PENDING_FOLDER, safeName);
+
+        try {
+          if (isBufferMode && f.buffer) {
+            fs.writeFileSync(destPath, f.buffer);
+          } else if (!isBufferMode) {
+            fs.renameSync(f, destPath);
+          }
+          pendingCount++;
+        } catch (ex) {
+          console.error(`Failed to save pending file ${fname}:`, ex.message);
+        }
+      }
+    }
+    console.log(`💾 Saved ${pendingCount} images to ${PENDING_FOLDER} for retry.`);
+  }
+
+  // Legacy failure log
+  if (failed.length && !isBufferMode && !stopProcessing) {
+    fs.writeFileSync("failed_images.json", JSON.stringify(failed, null, 2));
+  }
+
+  const stats = {
+    total: filesToProcess.length,
+    success: success.length,
+    failed: failed.length,
+    duplicate: success.filter(s => s.isDuplicate).length,
+    firstAttemptSuccess,
+    retrySuccess,
+    stoppedDueToQuota: stopProcessing
+  };
+
+  console.log("\n📊 FINAL SUMMARY");
+  console.log("Total:", stats.total);
+  console.log("Success:", stats.success);
+  console.log("Failed:", stats.failed);
+  if (stopProcessing) console.log("⚠️ Batch stopped due to Daily Quota Limit");
+
+  return { success, failed, stats };
 }
 
 // ================= EXPORT =================

@@ -6,14 +6,13 @@ export const uploadImages = async (req, res) => {
   console.log("this controller is called ", req.files)
   try {
     const files = req.files.map((file) => ({
-      filename: file.filename,
-      path: file.path,
+      filename: file.originalname, // Use originalname since we don't save to disk
       size: file.size,
     }));
 
-    // ✅ Run main() with SPECIFIC files
-    const uploadedFilePaths = req.files.map(f => f.path);
-    const extractionResults = await main(uploadedFilePaths);
+    // ✅ Run main() with IN-MEMORY buffers
+    // req.files is now an array of objects with { buffer, mimetype, originalname, ... }
+    const extractionResults = await main(req.files);
     const batchId = req.body.batchId || `batch_${Date.now()}`;
 
     // Save History (Upsert/Update logic for batch)

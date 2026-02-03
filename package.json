@@ -11,7 +11,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-   "@wdio/cli": "^9.20.0",
+    "@wdio/cli": "^9.20.0",
     "appium": "^3.1.0",
     "appium-doctor": "^1.15.1",
     "webdriverio": "^9.20.0"
@@ -24,6 +24,7 @@
     "express": "^5.1.0",
     "mongodb": "^6.20.0",
     "mongoose": "^8.19.2",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "node-schedule": "^2.1.1"
   }
 }
