@@ -5,6 +5,7 @@ import cors from "cors";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import billRoutes from "./routes/billRoutes.js";
 import stageRoutes from "./routes/stageRoutes.js";
+import historyRoutes from "./routes/historyRoutes.js";
 
 
 dotenv.config();
@@ -30,6 +31,7 @@ app.use(express.json());
 app.use("/api", uploadRoutes);
 app.use("/api/bills", billRoutes);
 app.use("/api/stages", stageRoutes);
+app.use("/api/history", historyRoutes);
 
 // ✅ Default route
 app.get("/", (req, res) => {
