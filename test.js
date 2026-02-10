@@ -1,6 +1,6 @@
 import { remote } from 'webdriverio';
 import Bill from "./models/billModel.js"; // ✅ Import Bill model
-import { ConsumerBillNumber } from './ConsumerBillNumber.js';
+import ConsumerNumber from "./models/consumerNumberModel.js"; // ✅ Import ConsumerNumber model
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 
@@ -329,7 +329,12 @@ mongoose
 // ✅ MAIN EXECUTION FLOW — Handles multiple consumers
 async function main() {
   const driver = await launchApp();
-  const uniqueBillNumbers = [...new Set(ConsumerBillNumber)];
+  /* 
+    Updated to fetch consumer numbers from MongoDB instead of local file 
+  */
+  const consumerDocs = await ConsumerNumber.find({}); // Fetch all consumer numbers
+  const uniqueBillNumbers = consumerDocs.map(doc => doc.consumerNumber); // Extract numbers
+
   let consumerNumbers = uniqueBillNumbers;
   const allData = [];
 
