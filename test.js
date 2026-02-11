@@ -112,17 +112,78 @@ async function clickViewBillButton(driver) {
   console.log("✅ Clicked 'View Bill' button");
 }
 
+// ✅ STEP 10.5 — Handle Error Dialogs
+async function handleErrorDialog(driver, consumerNumber) {
+  console.log("🔍 Checking for error dialogs...");
+
+  try {
+    // Logic for "Consumer number is incorrect"
+    const incorrectNumberText = await driver.$('//android.widget.TextView[@resource-id="com.msedcl.app:id/dialog_textview" and contains(@text, "Consumer number is incorrect")]');
+    if (await incorrectNumberText.isDisplayed()) {
+      console.log(`⚠️ Invalid Consumer Number: ${consumerNumber}`);
+
+      // Click OK
+      const okButton = await driver.$('//android.widget.Button[@resource-id="com.msedcl.app:id/button_one" and @text="OK"]');
+      await okButton.click();
+      console.log("✅ Clicked OK on error dialog");
+
+      // Update DB
+      if (mongoose.connection.readyState === 1) {
+        await ConsumerNumber.findOneAndUpdate(
+          { consumerNumber: consumerNumber },
+          { status: 'failed', remark: 'Consumer number is incorrect' },
+          { upsert: true } // Upsert in case testing with hardcoded numbers not in DB
+        );
+        console.log("💾 Updated ConsumerNumber status to failed (Incorrect Number)");
+      }
+
+      return true; // Error handled
+    }
+  } catch (e) {
+    // Ignore if element not found
+  }
+
+  try {
+    // Logic for "Consumer not found"
+    const notFoundText = await driver.$('//android.widget.TextView[@resource-id="com.msedcl.app:id/dialog_textview" and contains(@text, "Consumer not found")]');
+    if (await notFoundText.isDisplayed()) {
+      console.log(`⚠️ Consumer Not Found: ${consumerNumber}`);
+
+      // Click OK
+      const okButton = await driver.$('//android.widget.Button[@resource-id="com.msedcl.app:id/button_one" and @text="OK"]');
+      await okButton.click();
+      console.log("✅ Clicked OK on error dialog");
+
+      // Update DB
+      if (mongoose.connection.readyState === 1) {
+        await ConsumerNumber.findOneAndUpdate(
+          { consumerNumber: consumerNumber },
+          { status: 'failed', remark: 'Consumer not found' },
+          { upsert: true }
+        );
+        console.log("💾 Updated ConsumerNumber status to failed (Not Found)");
+      }
+
+      return true; // Error handled
+    }
+  } catch (e) {
+    // Ignore
+  }
+
+  return false; // No error found
+}
+
 // ✅ STEP 11 — Wait for new page to load after clicking
 async function waitForBillDetailsPage(driver) {
   console.log("⏳ Waiting for bill details to load...");
-  await driver.pause(8000);
+  // Increased wait time to 15 seconds and waiting for a specific data element
+  // This ensures the page is actually ready for scraping
+  const nameElement = await driver.$('//android.widget.TextView[@resource-id="com.msedcl.app:id/consumer_name_value_textview"]');
   try {
-    const billDetails = await driver.$('//android.widget.TextView[contains(@text, "Consumer") or contains(@text, "Bill")]');
-    if (await billDetails.isDisplayed()) {
-      console.log("✅ Bill details page loaded successfully!");
-    }
+    await nameElement.waitForDisplayed({ timeout: 15000 });
+    console.log("✅ Bill details page loaded successfully (Name element found)!");
   } catch {
-    console.log("⚠️ Unable to confirm bill details page visually.");
+    console.log("⚠️ Unable to confirm bill details page visually (Timeout).");
   }
 }
 
@@ -367,6 +428,17 @@ async function main() {
       await enterConsumerNumber(driver, number);
       await verifyConsumerNumber(driver, number);
       await clickViewBillButton(driver);
+
+      // CHECK API ERROR DIALOGS HERE
+      const isError = await handleErrorDialog(driver, number);
+      if (isError) {
+        console.log("⚠️ Skipping current consumer due to error...");
+        console.log("🔙 Navigating back to Home screen...");
+        await driver.back(); // Go back to home
+        await driver.pause(2000);
+        continue; // Skip the rest of loop
+      }
+
       await waitForBillDetailsPage(driver);
 
       const details = await retrieveBillDetails(driver);
@@ -380,7 +452,16 @@ async function main() {
       await newBill.save();
       console.log(`💾 Saved new bill for consumer: ${details.consumerNumber}`);
 
+      // Update consumer number status to success
+      await ConsumerNumber.findOneAndUpdate(
+        { consumerNumber: number },
+        { status: 'success', remark: 'Bill fetched successfully' },
+        { upsert: true }
+      );
+      console.log(`💾 Updated Status to Success for: ${number}`);
+
       allData.push(details);
+
 
       await waitForAndClickMahavitaranButton(driver);
       console.log("😴 Pausing for 5 seconds before next consumer...");

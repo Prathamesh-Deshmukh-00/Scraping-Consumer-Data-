@@ -8,6 +8,15 @@ const consumerNumberSchema = new mongoose.Schema(
             unique: true, // Ensure no duplicates
             trim: true,
         },
+        status: {
+            type: String,
+            enum: ['pending', 'success', 'failed'],
+            default: 'pending'
+        },
+        remark: {
+            type: String,
+            default: ''
+        }
     },
     { timestamps: true }
 );
