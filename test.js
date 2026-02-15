@@ -170,6 +170,33 @@ async function handleErrorDialog(driver, consumerNumber) {
     // Ignore
   }
 
+  try {
+    // Logic for "Bill cannot be shown"
+    const billNotShownText = await driver.$('//android.widget.TextView[@resource-id="com.msedcl.app:id/dialog_textview" and contains(@text, "Bill cannot be shown")]');
+    if (await billNotShownText.isDisplayed()) {
+      console.log(`⚠️ Bill cannot be shown for: ${consumerNumber}`);
+
+      // Click OK
+      const okButton = await driver.$('//android.widget.Button[@resource-id="com.msedcl.app:id/button_one" and @text="OK"]');
+      await okButton.click();
+      console.log("✅ Clicked OK on error dialog");
+
+      // Update DB
+      if (mongoose.connection.readyState === 1) {
+        await ConsumerNumber.findOneAndUpdate(
+          { consumerNumber: consumerNumber },
+          { status: 'failed', remark: 'Bill cannot be shown' },
+          { upsert: true }
+        );
+        console.log("💾 Updated ConsumerNumber status to failed (Bill cannot be shown)");
+      }
+
+      return true; // Error handled
+    }
+  } catch (e) {
+    // Ignore
+  }
+
   return false; // No error found
 }
 
